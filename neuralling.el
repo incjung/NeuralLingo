@@ -1,13 +1,14 @@
 ;;; neurallingo.el --- AI English Learning Assistant for Emacs -*- lexical-binding: t; -*-
 
 ;; Author: AI Assistant
-;; Version: 2.7
+;; Version: 3.0
 ;; Keywords: convenience, tools, learning
 
 ;;; Commentary:
 ;; 영어 기사나 텍스트를 읽을 때 문장 단위로 AI 분석을 제공합니다.
-;; - C-c a: 문장 분석 (Gemini 2.5 Flash 연동, 연상법 포함)
-;; - C-c q: 현재 문장에 대한 꼬리 질문 (미니버퍼 입력, 패널 하단에 누적)
+;; 친절하고 유머러스한 영어 선생님 페르소나가 적용되어 있습니다.
+;; - C-c a: 문장 분석 (Gemini 2.5 Flash 연동, 억양/예문/연상법 포함)
+;; - C-c q: 현재 문장에 대한 꼬리 질문 (미니버퍼 입력, 패널 내용 포함 누적)
 ;; - C-c s: 현재 문서(버퍼) 전용 학습 세션 자동 저장
 ;; - C-c l: 현재 문서(버퍼) 전용 학습 세션 불러오기 및 하이라이트 복원
 ;; - C-c r: 저장된 모든 세션을 모아 Org-mode 플래시카드로 복습(Remind)
@@ -54,6 +55,21 @@
   "Face for user's follow-up questions."
   :group 'neurallingo)
 
+;; 새롭게 추가된 Face (선생님 코멘트 및 예문용)
+(defface neurallingo-teacher-face
+  '((((class color) (background dark)) (:foreground "#fde047" :slant italic))
+    (((class color) (background light)) (:foreground "#ca8a04" :slant italic))
+    (t (:slant italic)))
+  "Face for teacher's humorous and energetic comments."
+  :group 'neurallingo)
+
+(defface neurallingo-example-face
+  '((((class color) (background dark)) (:foreground "#94a3b8"))
+    (((class color) (background light)) (:foreground "#475569"))
+    (t (:slant italic)))
+  "Face for real-life examples."
+  :group 'neurallingo)
+
 (defvar neurallingo-buffer-name "*NeuralLingo-Analysis*"
   "Name of the buffer used for displaying AI analysis.")
 
@@ -88,7 +104,7 @@
 (defun neurallingo--prepare-panel (&optional _)
   "우측 패널 버퍼를 가져오거나 새로 생성하여 창을 분할합니다."
   (let ((buf (get-buffer-create neurallingo-buffer-name)))
-    (display-buffer buf '(display-buffer-in-side-window (side . right) (window-width . 0.4)))
+    (display-buffer buf '(display-buffer-in-side-window (side . right) (window-width . 0.45)))
     buf))
 
 (defun neurallingo--show-loading (buf message-text)
@@ -108,27 +124,42 @@
         (insert (propertize "[ TARGET SENTENCE ]\n" 'face 'neurallingo-panel-header-face))
         (insert sentence "\n\n")
 
-        ;; 번역 영역
-        (insert (propertize "[ NATURAL TRANSLATION ]\n" 'face 'neurallingo-panel-header-face))
-        (insert (or (cdr (assoc "translation" data)) "로딩 중이거나 데이터를 불러올 수 없습니다.") "\n\n")
+        ;; 선생님의 코멘트 및 발음 꿀팁 (새로 추가됨)
+        (let ((comment (cdr (assoc "teacher_comment" data))))
+          (when comment
+            (insert (propertize "👩‍🏫 [ 선생님의 꿀팁 & 뉘앙스 ]\n" 'face 'neurallingo-panel-header-face))
+            (insert (propertize (format "%s\n\n" comment) 'face 'neurallingo-teacher-face))))
 
-        ;; 단어 영역 (연상법/Mnemonic 렌더링 추가)
-        (insert (propertize "[ KEY VOCABULARY ]\n" 'face 'neurallingo-panel-header-face))
+        ;; 번역 영역 (격식 / 비격식 세분화)
+        (let ((formal (cdr (assoc "formal_translation" data)))
+              (informal (cdr (assoc "informal_translation" data))))
+          (when (or formal informal)
+            (insert (propertize "📝 [ TRANSLATIONS ]\n" 'face 'neurallingo-panel-header-face))
+            (insert (format "👔 격식 표현: %s\n" (or formal "로딩 중...")))
+            (insert (format "😎 비격식/슬랭: %s\n\n" (or informal "로딩 중...")))))
+
+        ;; 단어 영역 (연상법, 발음, 예문 포함)
+        (insert (propertize "💡 [ KEY VOCABULARY & FUN FACTS ]\n" 'face 'neurallingo-panel-header-face))
         (let ((vocab-list (cdr (assoc "vocabulary" data))))
           (if (and vocab-list (not (eq vocab-list 'null)))
               (mapc (lambda (v)
                       (insert (propertize (format "> %s" (or (cdr (assoc "word" v)) "알 수 없음")) 'face 'font-lock-variable-name-face))
-                      (insert (format " [%s]\n  뜻: %s\n  반의어: %s\n  연상법: %s\n\n"
+                      (insert (format " [%s]\n  📖 뜻: %s\n"
                                       (or (cdr (assoc "pronunciation" v)) "-")
-                                      (or (cdr (assoc "meaning" v)) "-")
-                                      (or (cdr (assoc "antonym" v)) "-")
-                                      (or (cdr (assoc "mnemonic" v)) "-"))))
+                                      (or (cdr (assoc "meaning" v)) "-")))
+                      (insert (format "  🔗 연결고리: %s\n" (or (cdr (assoc "fun_connection" v)) "-")))
+                      (insert (format "  🗣️ 발음 팁: %s\n" (or (cdr (assoc "pronunciation_tip" v)) "-")))
+                      
+                      ;; 실생활 예문 렌더링
+                      (let ((examples (cdr (assoc "examples" v))))
+                        (when (and examples (listp examples))
+                          (insert "  📚 실생활 예문:\n")
+                          (mapc (lambda (ex)
+                                  (insert (propertize (format "     - %s\n" ex) 'face 'neurallingo-example-face)))
+                                examples)))
+                      (insert "\n"))
                     vocab-list)
             (insert "로딩 중이거나 추출된 핵심 단어가 없습니다.\n\n")))
-
-        ;; 배경지식 및 구조
-        (insert (propertize "[ CONTEXT & BACKGROUND ]\n" 'face 'neurallingo-panel-header-face))
-        (insert (or (cdr (assoc "context" data)) "로딩 중이거나 데이터를 불러올 수 없습니다.") "\n")
 
         ;; 💡 꼬리 질문(Q&A) 내역 렌더링
         (let ((qna-list (cdr (assoc "qna" data))))
@@ -195,25 +226,53 @@
           (message "[NeuralLingo] ⚡ 캐시된 분석 결과를 불러왔습니다.")
           (neurallingo--display-result cached-data sentence))
       (let ((buf (neurallingo--prepare-panel)))
-        (neurallingo--display-result '(("translation" . "로딩 중...")) sentence)
+        (neurallingo--display-result '(("formal_translation" . "로딩 중...")) sentence)
         (neurallingo--show-loading buf "CONNECTING TO GEMINI...")
-        (message "[NeuralLingo] Gemini AI 분석 스캐닝 중...")
+        (message "[NeuralLingo] 친절한 AI 선생님이 문장을 분석하고 있습니다...")
         
-        (let ((prompt (format "You are an expert English teacher for Korean speakers. Analyze the following sentence.
-Respond ONLY with a valid JSON object.
-{ \"translation\": \"Natural Korean translation\", \"vocabulary\": [ {\"word\": \"word\", \"pronunciation\": \"pron\", \"meaning\": \"Korean meaning\", \"antonym\": \"antonym\", \"mnemonic\": \"A short, clever mnemonic (연상법/기억술) to remember the word in Korean\"} ], \"context\": \"Grammar and context explanation\" }
-Sentence: \"%s\"" (replace-regexp-in-string "\"" "\\\"" sentence))))
+        ;; json-encode를 사용하여 정규식 이스케이프 오류 방지
+        (let* ((safe-sentence (substring (json-encode sentence) 1 -1))
+               ;; 변경된 프롬프트: 페르소나 및 요구사항 완벽 반영
+               (prompt (format "You are a highly competent, friendly, and humorous English teacher bridging Korean and English.
+Your goal is to help the user understand English naturally or translate Korean into natural English.
+Use easy-to-understand analogies instead of complex grammar jargon. Maintain an energetic and humorous tone.
+
+Rules:
+1. Provide a welcoming 'teacher_comment' addressing the overall nuance of the sentence and giving native-like pronunciation/intonation feedback.
+2. Provide both a formal translation and an informal/slang-friendly translation.
+3. Extract key vocabulary. For each word, provide a 'fun_connection' (etymology, mnemonic using similar-sounding Korean words, or cultural context) to make it unforgettable.
+4. Provide a 'pronunciation_tip' for each word focusing on stress and native-like linking.
+5. Provide exactly TWO practical, real-life examples for each vocabulary word.
+
+Sentence: \"%s\"
+
+Respond ONLY with a valid JSON object matching exactly this schema:
+{
+  \"teacher_comment\": \"Humorous greeting + explanation of sentence nuance (no jargon) + sentence-level intonation/stress tips.\",
+  \"formal_translation\": \"Formal Korean translation\",
+  \"informal_translation\": \"Informal, natural, or slang-friendly Korean translation\",
+  \"vocabulary\": [
+    {
+      \"word\": \"keyword\",
+      \"pronunciation\": \"pronunciation symbol & Korean spelling\",
+      \"meaning\": \"Korean meaning\",
+      \"fun_connection\": \"Fun etymology, mnemonic, or cultural link\",
+      \"pronunciation_tip\": \"Tips on linking, stress, native sounding\",
+      \"examples\": [\"Real-life example 1 with Korean translation\", \"Real-life example 2 with Korean translation\"]
+    }
+  ]
+}" safe-sentence)))
           
           (neurallingo--request-gemini-async prompt
            (lambda (parsed-data)
              (puthash sentence parsed-data neurallingo--analysis-cache)
              (neurallingo--display-result parsed-data sentence)
-             (message "[NeuralLingo] AI 분석 완료!"))
+             (message "[NeuralLingo] AI 선생님의 분석 완료!"))
            t))))))
 
 ;; 6. 메인 명령어: 꼬리 질문 (C-c q)
 (defun neurallingo-ask-question ()
-  "현재 문장에 대해 AI에게 꼬리 질문을 던지고 패널에 누적합니다."
+  "현재 문장 및 패널 분석 내용을 바탕으로 AI에게 꼬리 질문을 던지고 패널에 누적합니다."
   (interactive)
   (let* ((bounds (neurallingo--bounds-of-sentence-at-point))
          (sentence (buffer-substring-no-properties (car bounds) (cdr bounds)))
@@ -221,17 +280,32 @@ Sentence: \"%s\"" (replace-regexp-in-string "\"" "\\\"" sentence))))
     
     (if (not cached-data)
         (message "[NeuralLingo] 이 문장을 먼저 분석해주세요 (C-c a)")
-      (let ((question (read-string (format "질문 입력 (문맥: %s...): " (substring sentence 0 (min 20 (length sentence)))))))
+      (let ((question (read-string (format "선생님께 질문하기 (문맥: %s...): " (substring sentence 0 (min 20 (length sentence)))))))
         (when (not (string-empty-p question))
-          (let ((buf (neurallingo--prepare-panel)))
-            (neurallingo--show-loading buf (format "질문 분석 중: %s" question))
-            (message "[NeuralLingo] 답변을 기다리는 중...")
-            
-            (let ((prompt (format "You are an English teacher. Context Sentence: \"%s\"
+          (let* ((panel-buf (get-buffer neurallingo-buffer-name))
+                 (panel-text (if panel-buf
+                                 (with-current-buffer panel-buf
+                                   (buffer-substring-no-properties (point-min) (point-max)))
+                               ""))
+                 (safe-sentence (substring (json-encode sentence) 1 -1))
+                 (safe-panel-text (substring (json-encode panel-text) 1 -1))
+                 (safe-question (substring (json-encode question) 1 -1))
+                 ;; QnA에서도 선생님 페르소나 유지
+                 (prompt (format "You are a friendly, humorous, and highly competent English teacher. You explain things using easy analogies instead of complex grammar terminology.
+Context Sentence: \"%s\"
+
+Previous Analysis Context:
+%s
+
 User Question: \"%s\"
-Answer the question based on the context. Respond ONLY with the answer in Korean (No markdown formatting)." 
-                                  (replace-regexp-in-string "\"" "\\\"" sentence)
-                                  (replace-regexp-in-string "\"" "\\\"" question))))
+Answer the user's question energetically and kindly based on the context. Provide examples if helpful. Respond ONLY with the answer in Korean (No markdown block formatting)." 
+                                 safe-sentence
+                                 safe-panel-text
+                                 safe-question)))
+            
+            (let ((buf (neurallingo--prepare-panel)))
+              (neurallingo--show-loading buf (format "선생님이 질문을 읽고 있습니다: %s" question))
+              (message "[NeuralLingo] 답변을 기다리는 중...")
               
               (neurallingo--request-gemini-async prompt
                (lambda (answer)
@@ -240,7 +314,7 @@ Answer the question based on the context. Respond ONLY with the answer in Korean
                        (setcdr qna-cell (cons (cons question answer) (cdr qna-cell)))
                      (puthash sentence (cons (cons "qna" (list (cons question answer))) cached-data) neurallingo--analysis-cache)))
                  (neurallingo--display-result (gethash sentence neurallingo--analysis-cache) sentence)
-                 (message "[NeuralLingo] 질문에 대한 답변이 추가되었습니다!"))
+                 (message "[NeuralLingo] 선생님의 답변이 도착했습니다!"))
                nil))))))))
 
 ;; 7. 세션 자동 저장 및 관리를 위한 유틸리티 함수
@@ -306,9 +380,9 @@ Answer the question based on the context. Respond ONLY with the answer in Korean
       (with-current-buffer buf
         (erase-buffer)
         ;; Org-mode 문서 헤더
-        (insert "#+TITLE: NeuralLingo Review (단어 플래시카드)\n")
+        (insert "#+TITLE: NeuralLingo Review (선생님의 단어 플래시카드)\n")
         (insert "#+STARTUP: content\n\n")
-        (insert "💡 [학습 가이드] 영어 문장을 읽으며 스스로 뜻을 떠올려본 뒤, 'TAB' 키를 눌러 숨겨진 단어장을 펼쳐보세요!\n\n")
+        (insert "💡 [학습 가이드] 문장을 읽고 단어의 뜻과 연상법을 떠올려보세요. 'TAB' 키를 누르면 숨겨진 단어장이 열립니다!\n\n")
         
         ;; 모든 JSON 파일 순회
         (dolist (file files)
@@ -316,7 +390,6 @@ Answer the question based on the context. Respond ONLY with the answer in Korean
                  (json-object-type 'alist)
                  (json-array-type 'list)
                  (json-key-type 'string)
-                 ;; 손상된 캐시 파일이 있더라도 에러로 멈추지 않도록 예외 처리
                  (data (condition-case nil
                            (json-read-file file)
                          (error nil))))
@@ -328,7 +401,6 @@ Answer the question based on the context. Respond ONLY with the answer in Korean
                        (details (cdr item))
                        (vocab-list (cdr (assoc "vocabulary" details))))
                   
-                  ;; 단어가 추출된 문장만 복습 카드에 올림
                   (when (and sentence vocab-list (not (eq vocab-list 'null)))
                     (insert (format "** %s\n" sentence))
                     (insert "*** 💡 단어장 (TAB 눌러서 정답 확인)\n")
@@ -337,8 +409,14 @@ Answer the question based on the context. Respond ONLY with the answer in Korean
                                       (or (cdr (assoc "word" v)) "알 수 없음")
                                       (or (cdr (assoc "pronunciation" v)) "-")))
                       (insert (format "      뜻: %s\n" (or (cdr (assoc "meaning" v)) "-")))
-                      (insert (format "      반의어: %s\n" (or (cdr (assoc "antonym" v)) "-")))
-                      (insert (format "      연상법: %s\n\n" (or (cdr (assoc "mnemonic" v)) "-"))))))))))
+                      (insert (format "      🔗 연상법: %s\n" (or (cdr (assoc "fun_connection" v)) "-")))
+                      (let ((examples (cdr (assoc "examples" v))))
+                        (when (and examples (listp examples))
+                          (insert "      📚 예문:\n")
+                          (mapc (lambda (ex)
+                                  (insert (format "         - %s\n" ex)))
+                                examples)))
+                      (insert "\n"))))))))
         
         (org-mode)
         ;; 시작할 때 하위 트리(단어장)가 접혀 있도록 설정
@@ -366,4 +444,3 @@ Answer the question based on the context. Respond ONLY with the answer in Korean
   :keymap neurallingo-mode-map)
 
 (provide 'neurallingo)
-;;; neurallingo.el ends here
