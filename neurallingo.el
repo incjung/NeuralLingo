@@ -15,27 +15,58 @@
 ;; - C-c c: 모든 흔적 지우기
 
 ;;; Code:
+;;; neurallingo.el --- AI English Learning Assistant for Emacs (Vertex AI Version) -*- lexical-binding: t; -*-
+
+;; Author: AI Assistant
+;; Version: 4.0 (Vertex AI Edition)
+;; Keywords: convenience, tools, learning
+
+;;; Commentary:
+;; 구글 클라우드(Vertex AI)의 크레딧을 사용하여 영어 문장 분석을 제공합니다.
+;; 인증을 위해 시스템에 gcloud CLI가 설치되어 있어야 하며
+;; `gcloud auth application-default login`이 완료된 상태여야 합니다.
+
+;;; Code:
 
 (require 'json)
 (require 'url)
+(require 'subr-x)
 
 (defgroup neurallingo nil
-  "AI English Learning Assistant."
+  "AI English Learning Assistant via Vertex AI."
   :group 'tools)
 
-;; 사용자 지정 변수: Gemini API Key
-(defcustom neurallingo-gemini-api-key ""
-  "Google Gemini API Key for NeuralLingo."
-  :type 'string
-  :group 'neurallingo)
+;; [중요] 구글 클라우드 설정 변수
+;; (defcustom neurallingo-project-id "my-eng-analysis"
+;;   "Google Cloud Project ID."
+;;   :type 'string
+;;   :group 'neurallingo)
 
-;; 사용자 지정 변수: 세션 저장 디렉토리
+;; (defcustom neurallingo-location "us-central1"
+;;   "Google Cloud Region (e.g., us-central1)."
+;;   :type 'string
+;;   :group 'neurallingo)
+
+;; (defcustom neurallingo-model-id "gemini-2.5-flash"
+;;   "Vertex AI Model ID."
+;;   :type 'string
+;;   :group 'neurallingo)
+
 (defcustom neurallingo-cache-dir (expand-file-name "neurallingo" user-emacs-directory)
-  "문서별 학습 기록(JSON)이 자동으로 분리되어 저장될 기본 디렉토리입니다."
+  "문서별 학습 기록(JSON)이 자동으로 저장될 디렉토리입니다."
   :type 'string
   :group 'neurallingo)
 
-;; 1. 디자인 및 색상 설정 (Face Definitions)
+(defcustom neurallingo-request-timeout 30
+  "Timeout in seconds for Vertex AI requests."
+  :type 'integer
+  :group 'neurallingo)
+
+(defvar neurallingo--token-cache nil
+  "Internal cache for the Vertex AI access token.
+This is a list of (TOKEN . EXPIRATION-TIME).")
+
+;; 1. 디자인 및 색상 설정
 (defface neurallingo-highlight-face
   '((((class color) (background dark))
      (:background "#0f2b3c" :underline (:color "#22d3ee" :style wave)))
@@ -55,7 +86,6 @@
   "Face for user's follow-up questions."
   :group 'neurallingo)
 
-;; 새롭게 추가된 Face (선생님 코멘트 및 예문용)
 (defface neurallingo-teacher-face
   '((((class color) (background dark)) (:foreground "#fde047" :slant italic))
     (((class color) (background light)) (:foreground "#ca8a04" :slant italic))
@@ -73,7 +103,6 @@
 (defvar neurallingo-buffer-name "*NeuralLingo-Analysis*"
   "Name of the buffer used for displaying AI analysis.")
 
-;; 분석 결과를 저장할 해시 테이블 (메모리)
 (defvar neurallingo--analysis-cache (make-hash-table :test 'equal)
   "문장을 키로, 분석 결과(alist)를 값으로 저장하는 해시 테이블.")
 
@@ -100,7 +129,7 @@
   (clrhash neurallingo--analysis-cache)
   (message "[NeuralLingo] 모든 학습 흔적과 캐시 메모리가 초기화되었습니다."))
 
-;; 3. 사이드 패널 윈도우 관리 및 렌더링
+;; 3. 사이드 패널 관리 및 렌더링
 (defun neurallingo--prepare-panel (&optional _)
   "우측 패널 버퍼를 가져오거나 새로 생성하여 창을 분할합니다."
   (let ((buf (get-buffer-create neurallingo-buffer-name)))
@@ -108,107 +137,138 @@
     buf))
 
 (defun neurallingo--show-loading (buf message-text)
-  "패널에 로딩 메시지를 추가합니다."
   (with-current-buffer buf
     (let ((inhibit-read-only t))
       (goto-char (point-max))
       (insert (propertize (format "\n> %s\n" message-text) 'face 'warning)))))
 
 (defun neurallingo--display-result (data sentence)
-  "분석 결과(기본 데이터 + Q&A 내역)를 사이드 패널에 렌더링합니다."
+  "분석 결과를 사이드 패널에 렌더링합니다."
   (let ((buf (neurallingo--prepare-panel)))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
-        ;; 원문 표시
         (insert (propertize "[ TARGET SENTENCE ]\n" 'face 'neurallingo-panel-header-face))
         (insert sentence "\n\n")
 
-        ;; 선생님의 코멘트 및 발음 꿀팁 (새로 추가됨)
-        (let ((comment (cdr (assoc "teacher_comment" data))))
-          (when comment
-            (insert (propertize "👩‍🏫 [ 선생님의 꿀팁 & 뉘앙스 ]\n" 'face 'neurallingo-panel-header-face))
-            (insert (propertize (format "%s\n\n" comment) 'face 'neurallingo-teacher-face))))
+        (if (not data)
+            (insert (propertize "❌ 데이터를 불러오는 데 실패했습니다." 'face 'error))
+          
+          (let ((comment (or (cdr (assoc "teacher_comment" data)) (cdr (assoc 'teacher_comment data)))))
+            (when comment
+              (insert (propertize "👩‍🏫 [ 선생님의 꿀팁 & 뉘앙스 ]\n" 'face 'neurallingo-panel-header-face))
+              (insert (propertize (format "%s\n\n" comment) 'face 'neurallingo-teacher-face))))
 
-        ;; 번역 영역 (격식 / 비격식 세분화)
-        (let ((formal (cdr (assoc "formal_translation" data)))
-              (informal (cdr (assoc "informal_translation" data))))
-          (when (or formal informal)
-            (insert (propertize "📝 [ TRANSLATIONS ]\n" 'face 'neurallingo-panel-header-face))
-            (insert (format "👔 격식 표현: %s\n" (or formal "로딩 중...")))
-            (insert (format "😎 비격식/슬랭: %s\n\n" (or informal "로딩 중...")))))
+          (let ((formal (or (cdr (assoc "formal_translation" data)) (cdr (assoc 'formal_translation data))))
+                (informal (or (cdr (assoc "informal_translation" data)) (cdr (assoc 'informal_translation data)))))
+            (when (or formal informal)
+              (insert (propertize "📝 [ TRANSLATIONS ]\n" 'face 'neurallingo-panel-header-face))
+              (insert (format "👔 격식 표현: %s\n" (or formal "-")))
+              (insert (format "😎 비격식/슬랭: %s\n\n" (or informal "-")))))
 
-        ;; 단어 영역 (연상법, 발음, 예문 포함)
-        (insert (propertize "💡 [ KEY VOCABULARY & FUN FACTS ]\n" 'face 'neurallingo-panel-header-face))
-        (let ((vocab-list (cdr (assoc "vocabulary" data))))
-          (if (and vocab-list (not (eq vocab-list 'null)))
-              (mapc (lambda (v)
-                      (insert (propertize (format "> %s" (or (cdr (assoc "word" v)) "알 수 없음")) 'face 'font-lock-variable-name-face))
-                      (insert (format " [%s]\n  📖 뜻: %s\n"
-                                      (or (cdr (assoc "pronunciation" v)) "-")
-                                      (or (cdr (assoc "meaning" v)) "-")))
-                      (insert (format "  🔗 연결고리: %s\n" (or (cdr (assoc "fun_connection" v)) "-")))
-                      (insert (format "  🗣️ 발음 팁: %s\n" (or (cdr (assoc "pronunciation_tip" v)) "-")))
-                      
-                      ;; 실생활 예문 렌더링
-                      (let ((examples (cdr (assoc "examples" v))))
-                        (when (and examples (listp examples))
-                          (insert "  📚 실생활 예문:\n")
-                          (mapc (lambda (ex)
-                                  (insert (propertize (format "     - %s\n" ex) 'face 'neurallingo-example-face)))
-                                examples)))
-                      (insert "\n"))
-                    vocab-list)
-            (insert "로딩 중이거나 추출된 핵심 단어가 없습니다.\n\n")))
+          (insert (propertize "💡 [ KEY VOCABULARY ]\n" 'face 'neurallingo-panel-header-face))
+          (let ((vocab-list (or (cdr (assoc "vocabulary" data)) (cdr (assoc 'vocabulary data)))))
+            (if (and vocab-list (not (eq vocab-list 'null)))
+                (mapc (lambda (v)
+                        (insert (propertize (format "> %s" (or (cdr (assoc "word" v)) (cdr (assoc 'word v)) "알 수 없음")) 'face 'font-lock-variable-name-face))
+                        (insert (format " [%s]\n  📖 뜻: %s\n"
+                                        (or (cdr (assoc "pronunciation" v)) (cdr (assoc 'pronunciation v)) "-")
+                                        (or (cdr (assoc "meaning" v)) (cdr (assoc 'meaning v)) "-")))
+                        (insert (format "  🔗 연결고리: %s\n" (or (cdr (assoc "fun_connection" v)) (cdr (assoc 'fun_connection v)) "-")))
+                        (insert (format "  🗣️ 발음 팁: %s\n" (or (cdr (assoc "pronunciation_tip" v)) (cdr (assoc 'pronunciation_tip v)) "-")))
+                        (let ((examples (or (cdr (assoc "examples" v)) (cdr (assoc 'examples v)))))
+                          (when (and examples (listp examples))
+                            (insert "  📚 실생활 예문:\n")
+                            (mapc (lambda (ex)
+                                    (insert (propertize (format "      - %s\n" ex) 'face 'neurallingo-example-face)))
+                                  examples)))
+                        (insert "\n"))
+                      vocab-list)
+              (insert "로딩 중이거나 추출된 핵심 단어가 없습니다.\n\n")))
 
-        ;; 💡 꼬리 질문(Q&A) 내역 렌더링
-        (let ((qna-list (cdr (assoc "qna" data))))
-          (when qna-list
-            (insert (propertize "\n[ ADDITIONAL Q&A ]\n" 'face 'neurallingo-panel-header-face))
-            (dolist (qna (reverse qna-list))
-              (insert (propertize (format "Q: %s\n" (car qna)) 'face 'neurallingo-qna-question-face))
-              (insert (format "A: %s\n\n" (cdr qna))))))
+          (let ((qna-list (or (cdr (assoc "qna" data)) (cdr (assoc 'qna data)))))
+            (when qna-list
+              (insert (propertize "\n[ ADDITIONAL Q&A ]\n" 'face 'neurallingo-panel-header-face))
+              (dolist (qna (reverse qna-list))
+                (insert (propertize (format "Q: %s\n" (car qna)) 'face 'neurallingo-qna-question-face))
+                (insert (format "A: %s\n\n" (cdr qna)))))))
         
         (goto-char (point-max))))))
 
-;; 4. Gemini API 연동
-(defun neurallingo--request-gemini-async (prompt callback parse-json-p)
-  "Gemini API 비동기 호출 공통 함수."
-  (if (string-empty-p neurallingo-gemini-api-key)
-      (error "[NeuralLingo] 오류: `neurallingo-gemini-api-key`가 설정되지 않았습니다.")
-    (let* ((url-request-method "POST")
-           (url-request-extra-headers '(("Content-Type" . "application/json")))
-           (payload-alist `(("contents" . [(("parts" . [(("text" . ,prompt))]) ("role" . "user"))])))
-           (payload-alist (if parse-json-p
-                              (append payload-alist '(("generationConfig" . (("responseMimeType" . "application/json")))))
-                            payload-alist))
-           (url-request-data (encode-coding-string (json-encode payload-alist) 'utf-8))
-           (url (format "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=%s" neurallingo-gemini-api-key)))
-      
-      (url-retrieve url
-                    (lambda (status cb is-json)
-                      (if (plist-get status :error)
-                          (message "[NeuralLingo] API 요청 실패: %s" (plist-get status :error))
-                        (goto-char (point-min))
-                        (re-search-forward "^$" nil 'move)
-                        (forward-line)
-                        (let* ((response-str (decode-coding-string (buffer-substring-no-properties (point) (point-max)) 'utf-8)))
-                          (kill-buffer (current-buffer))
-                          (condition-case err
-                              (let* ((json-object-type 'alist)
-                                     (json-array-type 'list)
-                                     (json-key-type 'string)
-                                     (response (json-read-from-string response-str))
-                                     (candidates (cdr (assoc "candidates" response)))
-                                     (content (cdr (assoc "content" (car candidates))))
-                                     (parts (cdr (assoc "parts" content)))
-                                     (text (cdr (assoc "text" (car parts)))))
-                                (if is-json
-                                    (funcall cb (json-read-from-string text))
-                                  (funcall cb text)))
-                            (error (message "[NeuralLingo] 응답 처리 에러: %S" err))))))
-                    (list callback parse-json-p)))))
+;; 4. Vertex AI API 연동 (OAuth2 인증 방식, 개선됨)
+(defun neurallingo--get-cached-access-token ()
+  "Return a cached Vertex AI access token.
+If the token is expired or not available, fetch a new one."
+  (if (and neurallingo--token-cache
+           (time-less-p (current-time) (cdr neurallingo--token-cache)))
+      (car neurallingo--token-cache)
+    (message "[NeuralLingo] Authenticating with gcloud...")
+    (let ((token (string-trim (shell-command-to-string "gcloud auth print-access-token"))))
+      (if (string-empty-p token)
+          (error "[NeuralLingo] Failed to get access token from gcloud. Is it configured correctly?")
+        (setq neurallingo--token-cache (cons token (time-add (current-time) (seconds-to-time 3500)))) ; Cache for just under an hour
+        (car neurallingo--token-cache)))))
 
+(defun neurallingo--request-gemini-async (prompt callback parse-json-p)
+  "Vertex AI API 비동기 호출 (크레딧 사용 버전, 개선됨)."
+  (let* ((token (neurallingo--get-cached-access-token))
+         (url (format "https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:generateContent"
+                      neurallingo-location
+                      neurallingo-project-id
+                      neurallingo-location
+                      neurallingo-model-id))
+         (url-request-method "POST")
+         (url-request-extra-headers `(("Content-Type" . "application/json")
+                                      ("Authorization" . ,(encode-coding-string (format "Bearer %s" token) 'utf-8))))
+         (payload-alist `(("contents" . [(("parts" . [(("text" . ,prompt))]) ("role" . "user"))])))
+         (payload-alist (if parse-json-p
+                            (append payload-alist '(("generationConfig" . (("responseMimeType" . "application/json")))))
+                          payload-alist))
+         (url-request-data (encode-coding-string (json-encode payload-alist) 'utf-8))
+         (url-retrieve-timeout neurallingo-request-timeout)
+         (final-url (encode-coding-string url 'utf-8)))
+    (url-retrieve final-url
+                  (lambda (status cb is-json)
+                    (unwind-protect
+                        (with-current-buffer (current-buffer)
+                          (let ((err (plist-get status :error)))
+                            (if err
+                                (message "[NeuralLingo] Request failed: %s" err)
+                              (progn
+                                ;; Check HTTP status
+                                (goto-char (point-min))
+                                (let ((http-status nil))
+                                  (when (re-search-forward "^HTTP/[0-9.]* +\\([0-9]+\\)" nil t)
+                                    (setq http-status (string-to-number (match-string 1))))
+                                  (re-search-forward "^$" nil 'move)
+                                  (forward-line)
+                                  (let ((response-str (decode-coding-string (buffer-substring-no-properties (point) (point-max)) 'utf-8)))
+                                    (if (and http-status (>= http-status 200) (< http-status 300))
+                                        ;; Success, parse response
+                                        (condition-case err
+                                            (let* ((json-object-type 'alist)
+                                                   (json-key-type 'string)
+                                                   (json-array-type 'list)
+                                                   (response (json-read-from-string response-str))
+                                                   (candidates (cdr (assoc "candidates" response)))
+                                                   (candidate (car candidates))
+                                                   (content (cdr (assoc "content" candidate)))
+                                                   (parts (cdr (assoc "parts" content)))
+                                                   (part (car parts))
+                                                   (text (cdr (assoc "text" part))))
+                                              (if (and text (stringp text))
+                                                  (let ((parsed-text (if is-json 
+                                                                         (json-read-from-string text)
+                                                                       text)))
+                                                    (funcall cb parsed-text))
+                                                (message "[NeuralLingo] Error: Could not find 'text' in response. Raw response: %s" response-str)))
+                                          (error (message "[NeuralLingo] JSON parsing error: %s (Raw: %s)" err response-str)))
+                                      ;; Not 2xx, API error
+                                      (message "[NeuralLingo] API Error (HTTP %s): %s"
+                                               (or http-status "N/A")
+                                               response-str))))))))
+                    (kill-buffer (current-buffer))))
+                  (list callback parse-json-p))))
 ;; 5. 메인 명령어: 문장 분석 (C-c a)
 (defun neurallingo-analyze-current-sentence ()
   "현재 문장 분석 시작."
@@ -226,14 +286,12 @@
           (message "[NeuralLingo] ⚡ 캐시된 분석 결과를 불러왔습니다.")
           (neurallingo--display-result cached-data sentence))
       (let ((buf (neurallingo--prepare-panel)))
-        (neurallingo--display-result '(("formal_translation" . "로딩 중...")) sentence)
-        (neurallingo--show-loading buf "CONNECTING TO GEMINI...")
-        (message "[NeuralLingo] 친절한 AI 선생님이 문장을 분석하고 있습니다...")
+        (neurallingo--display-result '(("formal_translation" . "선생님이 생각 중...")) sentence)
+        (neurallingo--show-loading buf (format "CONNECTING TO VERTEX AI (%s)..." neurallingo-project-id))
+        (message "[NeuralLingo] 구글 클라우드 크레딧을 사용하여 분석 중입니다...")
         
-        ;; json-encode를 사용하여 정규식 이스케이프 오류 방지
         (let* ((safe-sentence (substring (json-encode sentence) 1 -1))
-               ;; 변경된 프롬프트: 페르소나 및 요구사항 완벽 반영
-               (prompt (format "You are a highly competent, friendly, and humorous English teacher bridging Korean and English.
+               (prompt (format  "You are a highly competent, friendly, and humorous English teacher bridging Korean and English.
 Your goal is to help the user understand English naturally or translate Korean into natural English.
 Use easy-to-understand analogies instead of complex grammar jargon. Maintain an energetic and humorous tone.
 
@@ -268,12 +326,11 @@ Respond ONLY with a valid JSON object matching exactly this schema:
            (lambda (parsed-data)
              (puthash sentence parsed-data neurallingo--analysis-cache)
              (neurallingo--display-result parsed-data sentence)
-             (message "[NeuralLingo] AI 선생님의 분석 완료!"))
+             (message "[NeuralLingo] 분석 완료!"))
            t))))))
 
 ;; 6. 메인 명령어: 꼬리 질문 (C-c q)
 (defun neurallingo-ask-question ()
-  "현재 문장 및 패널 분석 내용을 바탕으로 AI에게 꼬리 질문을 던지고 패널에 누적합니다."
   (interactive)
   (let* ((bounds (neurallingo--bounds-of-sentence-at-point))
          (sentence (buffer-substring-no-properties (car bounds) (cdr bounds)))
@@ -281,167 +338,99 @@ Respond ONLY with a valid JSON object matching exactly this schema:
     
     (if (not cached-data)
         (message "[NeuralLingo] 이 문장을 먼저 분석해주세요 (C-c a)")
-      (let ((question (read-string (format "선생님께 질문하기 (문맥: %s...): " (substring sentence 0 (min 20 (length sentence)))))))
+      (let ((question (read-string "선생님께 질문하기: ")))
         (when (not (string-empty-p question))
-          (let* ((panel-buf (get-buffer neurallingo-buffer-name))
-                 (panel-text (if panel-buf
-                                 (with-current-buffer panel-buf
-                                   (buffer-substring-no-properties (point-min) (point-max)))
-                               ""))
-                 (safe-sentence (substring (json-encode sentence) 1 -1))
-                 (safe-panel-text (substring (json-encode panel-text) 1 -1))
-                 (safe-question (substring (json-encode question) 1 -1))
-                 ;; QnA에서도 선생님 페르소나 유지
-                 (prompt (format "You are a friendly, humorous, and highly competent English teacher. You explain things using easy analogies instead of complex grammar terminology.
-Context Sentence: \"%s\"
+          (let* ((analysis-copy (copy-alist cached-data))
+                 ;; Q&A 히스토리는 따로 뺍니다 (프롬프트 구성용)
+                 (history (cdr (or (assoc "qna" analysis-copy) (assoc 'qna analysis-copy))))
+                 ;; 분석 데이터에서 qna는 제외하고 순수 분석 내용만 JSON으로 변환
+                 (_ (setq analysis-copy (assoc-delete-all "qna" (assoc-delete-all 'qna analysis-copy))))
+                 (analysis-json (json-encode analysis-copy))
+                 (history-str (if history 
+                                  (mapconcat (lambda (qna) (format "Q: %s\nA: %s" (car qna) (cdr qna))) (reverse history) "\n")
+                                "No previous questions."))
+                 (prompt (format "You are a friendly and humorous English teacher.
+The student is studying this sentence: \"%s\"
 
-Previous Analysis Context:
+[Initial Analysis Provided to Student]:
 %s
 
-User Question: \"%s\"
-Answer the user's question energetically and kindly based on the context. Provide examples if helpful. Respond ONLY with the answer in Korean (No markdown block formatting)." 
-                                 safe-sentence
-                                 safe-panel-text
-                                 safe-question)))
+[Previous Q&A History]:
+%s
+
+[Student's New Question]:
+\"%s\"
+
+Please answer the student's question kindly in Korean, keeping the teacher persona and referencing the analysis if needed." 
+                                 sentence analysis-json history-str question)))
             
             (let ((buf (neurallingo--prepare-panel)))
-              (neurallingo--show-loading buf (format "선생님이 질문을 읽고 있습니다: %s" question))
-              (message "[NeuralLingo] 답변을 기다리는 중...")
-              
+              (neurallingo--show-loading buf (format "질문 답변 중: %s" question))
               (neurallingo--request-gemini-async prompt
                (lambda (answer)
-                 (let ((qna-cell (assoc "qna" cached-data)))
+                 (let* ((current-data (gethash sentence neurallingo--analysis-cache))
+                        (qna-cell (or (assoc "qna" current-data)
+                                     (assoc 'qna current-data))))
                    (if qna-cell
                        (setcdr qna-cell (cons (cons question answer) (cdr qna-cell)))
-                     (puthash sentence (cons (cons "qna" (list (cons question answer))) cached-data) neurallingo--analysis-cache)))
-                 (neurallingo--display-result (gethash sentence neurallingo--analysis-cache) sentence)
-                 (message "[NeuralLingo] 선생님의 답변이 도착했습니다!"))
+                     (puthash sentence (cons (cons "qna" (list (cons question answer))) current-data) neurallingo--analysis-cache))
+                   (neurallingo--display-result (gethash sentence neurallingo--analysis-cache) sentence)
+                   (message "[NeuralLingo] 답변 도착!")))
                nil))))))))
 
-;; 7. 세션 자동 저장 및 관리를 위한 유틸리티 함수
+;; 7. 세션 저장/불러오기 유틸리티
 (defun neurallingo--get-session-file-path ()
-  "현재 버퍼에 맞는 고유한 세션 파일 경로를 반환합니다."
   (let* ((raw-name (buffer-name))
          (safe-name (replace-regexp-in-string "[^A-Za-z0-9가-힣.-]" "_" raw-name)))
     (expand-file-name (format "%s.json" safe-name) neurallingo-cache-dir)))
 
-;; 8. 메인 명령어: 세션 저장, 불러오기, 그리고 복습(Remind) 기능
 (defun neurallingo-save-session ()
-  "현재 분석된 모든 데이터와 질문 내역을 현재 버퍼 전용 JSON 파일로 저장합니다."
   (interactive)
   (let ((data nil)
-        (file-path (neurallingo--get-session-file-path)))
-    (unless (file-exists-p neurallingo-cache-dir)
-      (make-directory neurallingo-cache-dir t))
-    
+        (file-path (neurallingo--get-session-file-path))
+        (coding-system-for-write 'utf-8))
+    (unless (file-exists-p neurallingo-cache-dir) (make-directory neurallingo-cache-dir t))
     (maphash (lambda (k v) (push (cons k v) data)) neurallingo--analysis-cache)
-    (with-temp-file file-path
+    (with-temp-file file-path 
+      (set-buffer-file-coding-system 'utf-8)
       (insert (if data (json-encode data) "{}")))
-    (message "[NeuralLingo] 현재 버퍼(%s)의 세션이 저장되었습니다." (buffer-name))))
+    (message "[NeuralLingo] 세션 저장 완료.")))
 
 (defun neurallingo-load-session ()
-  "현재 버퍼 전용으로 저장된 세션을 불러오고 본문에 하이라이트를 복원합니다."
   (interactive)
-  (let ((file-path (neurallingo--get-session-file-path)))
+  (let ((file-path (neurallingo--get-session-file-path))
+        (coding-system-for-read 'utf-8))
     (if (file-exists-p file-path)
         (let* ((json-object-type 'alist)
-               (json-array-type 'list)
                (json-key-type 'string)
                (data (json-read-file file-path)))
           (clrhash neurallingo--analysis-cache)
-          (when data
-            (dolist (item data)
-              (puthash (car item) (cdr item) neurallingo--analysis-cache)))
-          
+          (when data (dolist (item data) (puthash (car item) (cdr item) neurallingo--analysis-cache)))
           (save-excursion
             (goto-char (point-min))
             (while (not (eobp))
               (let* ((bounds (neurallingo--bounds-of-sentence-at-point))
-                     (beg (car bounds))
-                     (end (cdr bounds))
-                     (sentence (buffer-substring-no-properties beg end)))
+                     (sentence (buffer-substring-no-properties (car bounds) (cdr bounds))))
                 (when (gethash sentence neurallingo--analysis-cache)
-                  (neurallingo--highlight-region beg end)))
+                  (neurallingo--highlight-region (car bounds) (cdr bounds))))
               (forward-sentence)))
-          (message "[NeuralLingo] 문서 전용 세션을 성공적으로 불러왔습니다!"))
-      (message "[NeuralLingo] 이 버퍼(%s)에 대해 저장된 세션 파일이 없습니다." (buffer-name)))))
+          (message "[NeuralLingo] 세션 로드 완료!"))
+      (message "[NeuralLingo] 저장된 파일이 없습니다."))))
 
-(defun neurallingo-review ()
-  "저장된 모든 세션을 모아 org-mode 기반의 복습(Remind) 플래시카드 버퍼를 생성합니다."
-  (interactive)
-  (unless (file-exists-p neurallingo-cache-dir)
-    (error "[NeuralLingo] 저장된 학습 기록 폴더가 없습니다."))
-  
-  (let ((files (directory-files neurallingo-cache-dir t "\\.json$"))
-        (buf (get-buffer-create "*NeuralLingo-Review*")))
-    
-    (if (null files)
-        (message "[NeuralLingo] 복습할 세션 파일이 하나도 없습니다. 먼저 문서를 저장(C-c s)해 주세요.")
-      
-      (with-current-buffer buf
-        (erase-buffer)
-        ;; Org-mode 문서 헤더
-        (insert "#+TITLE: NeuralLingo Review (선생님의 단어 플래시카드)\n")
-        (insert "#+STARTUP: content\n\n")
-        (insert "💡 [학습 가이드] 문장을 읽고 단어의 뜻과 연상법을 떠올려보세요. 'TAB' 키를 누르면 숨겨진 단어장이 열립니다!\n\n")
-        
-        ;; 모든 JSON 파일 순회
-        (dolist (file files)
-          (let* ((filename (file-name-base file))
-                 (json-object-type 'alist)
-                 (json-array-type 'list)
-                 (json-key-type 'string)
-                 (data (condition-case nil
-                           (json-read-file file)
-                         (error nil))))
-            
-            (when (and data (not (eq data 'null)))
-              (insert (format "* 📁 문서: %s\n" filename))
-              (dolist (item data)
-                (let* ((sentence (car item))
-                       (details (cdr item))
-                       (vocab-list (cdr (assoc "vocabulary" details))))
-                  
-                  (when (and sentence vocab-list (not (eq vocab-list 'null)))
-                    (insert (format "** %s\n" sentence))
-                    (insert "*** 💡 단어장 (TAB 눌러서 정답 확인)\n")
-                    (dolist (v vocab-list)
-                      (insert (format "    - %s [%s]\n" 
-                                      (or (cdr (assoc "word" v)) "알 수 없음")
-                                      (or (cdr (assoc "pronunciation" v)) "-")))
-                      (insert (format "      뜻: %s\n" (or (cdr (assoc "meaning" v)) "-")))
-                      (insert (format "      🔗 연상법: %s\n" (or (cdr (assoc "fun_connection" v)) "-")))
-                      (let ((examples (cdr (assoc "examples" v))))
-                        (when (and examples (listp examples))
-                          (insert "      📚 예문:\n")
-                          (mapc (lambda (ex)
-                                  (insert (format "         - %s\n" ex)))
-                                examples)))
-                      (insert "\n"))))))))
-        
-        (org-mode)
-        ;; 시작할 때 하위 트리(단어장)가 접혀 있도록 설정
-        (org-cycle-set-startup-visibility)
-        (switch-to-buffer buf)
-        (message "[NeuralLingo] 복습 버퍼가 생성되었습니다! 문장에서 TAB을 눌러보세요.")))))
-
-;; 9. Minor Mode 설정
+;; 8. 키맵 및 모드 설정
 (defvar neurallingo-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c a") 'neurallingo-analyze-current-sentence)
     (define-key map (kbd "C-c q") 'neurallingo-ask-question)
     (define-key map (kbd "C-c s") 'neurallingo-save-session)
     (define-key map (kbd "C-c l") 'neurallingo-load-session)
-    (define-key map (kbd "C-c r") 'neurallingo-review)
     (define-key map (kbd "C-c c") 'neurallingo-clear-all-highlights)
-    map)
-  "Keymap for `neurallingo-mode`.")
+    map))
 
 ;;;###autoload
 (define-minor-mode neurallingo-mode
-  "영어 문장 단위 AI 분석 및 꼬리 질문을 제공하는 마이너 모드입니다."
-  :init-value nil
-  :lighter " NLingo"
+  "Vertex AI를 사용하는 영어 분석 마이너 모드."
+  :lighter " NLingo(V)"
   :keymap neurallingo-mode-map)
 
 (provide 'neurallingo)
