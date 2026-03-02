@@ -1,20 +1,3 @@
-;;; neurallingo.el --- AI English Learning Assistant for Emacs -*- lexical-binding: t; -*-
-
-;; Author: AI Assistant
-;; Version: 3.0
-;; Keywords: convenience, tools, learning
-
-;;; Commentary:
-;; 영어 기사나 텍스트를 읽을 때 문장 단위로 AI 분석을 제공합니다.
-;; 친절하고 유머러스한 영어 선생님 페르소나가 적용되어 있습니다.
-;; - C-c a: 문장 분석 (Gemini 2.5 Flash 연동, 억양/예문/연상법 포함)
-;; - C-c q: 현재 문장에 대한 꼬리 질문 (미니버퍼 입력, 패널 내용 포함 누적)
-;; - C-c s: 현재 문서(버퍼) 전용 학습 세션 자동 저장
-;; - C-c l: 현재 문서(버퍼) 전용 학습 세션 불러오기 및 하이라이트 복원
-;; - C-c r: 저장된 모든 세션을 모아 Org-mode 플래시카드로 복습(Remind)
-;; - C-c c: 모든 흔적 지우기
-
-;;; Code:
 ;;; neurallingo.el --- AI English Learning Assistant for Emacs (Vertex AI Version) -*- lexical-binding: t; -*-
 
 ;; Author: AI Assistant
@@ -25,32 +8,39 @@
 ;; 구글 클라우드(Vertex AI)의 크레딧을 사용하여 영어 문장 분석을 제공합니다.
 ;; 인증을 위해 시스템에 gcloud CLI가 설치되어 있어야 하며
 ;; `gcloud auth application-default login`이 완료된 상태여야 합니다.
+;; - C-c a: 문장 분석 (Vertex AI 연동, 억양/예문/연상법 포함)
+;; - C-c q: 현재 문장에 대한 꼬리 질문 (미니버퍼 입력, 패널 내용 포함 누적)
+;; - C-c s: 현재 문서(버퍼) 전용 학습 세션 자동 저장
+;; - C-c l: 현재 문서(버퍼) 전용 학습 세션 불러오기 및 하이라이트 복원
+;; - C-c r: 저장된 모든 세션을 파일별 그룹화하여 Org-mode로 복습
+;; - C-c c: 모든 흔적 지우기
 
 ;;; Code:
 
 (require 'json)
 (require 'url)
 (require 'subr-x)
+(require 'org)
 
 (defgroup neurallingo nil
   "AI English Learning Assistant via Vertex AI."
   :group 'tools)
 
 ;; [중요] 구글 클라우드 설정 변수
-;; (defcustom neurallingo-project-id "my-eng-analysis"
-;;   "Google Cloud Project ID."
-;;   :type 'string
-;;   :group 'neurallingo)
+(defcustom neurallingo-project-id "my-eng-analysis"
+  "Google Cloud Project ID."
+  :type 'string
+  :group 'neurallingo)
 
-;; (defcustom neurallingo-location "us-central1"
-;;   "Google Cloud Region (e.g., us-central1)."
-;;   :type 'string
-;;   :group 'neurallingo)
+(defcustom neurallingo-location "us-central1"
+  "Google Cloud Region (e.g., us-central1)."
+  :type 'string
+  :group 'neurallingo)
 
-;; (defcustom neurallingo-model-id "gemini-2.5-flash"
-;;   "Vertex AI Model ID."
-;;   :type 'string
-;;   :group 'neurallingo)
+(defcustom neurallingo-model-id "gemini-2.5-flash"
+  "Vertex AI Model ID."
+  :type 'string
+  :group 'neurallingo)
 
 (defcustom neurallingo-cache-dir (expand-file-name "neurallingo" user-emacs-directory)
   "문서별 학습 기록(JSON)이 자동으로 저장될 디렉토리입니다."
@@ -225,7 +215,6 @@ If the token is expired or not available, fetch a new one."
                             (append payload-alist '(("generationConfig" . (("responseMimeType" . "application/json")))))
                           payload-alist))
          (url-request-data (encode-coding-string (json-encode payload-alist) 'utf-8))
-         (url-retrieve-timeout neurallingo-request-timeout)
          (final-url (encode-coding-string url 'utf-8)))
     (url-retrieve final-url
                   (lambda (status cb is-json)
@@ -403,6 +392,7 @@ Please answer the student's question kindly in Korean, keeping the teacher perso
     (if (file-exists-p file-path)
         (let* ((json-object-type 'alist)
                (json-key-type 'string)
+               (json-array-type 'list)
                (data (json-read-file file-path)))
           (clrhash neurallingo--analysis-cache)
           (when data (dolist (item data) (puthash (car item) (cdr item) neurallingo--analysis-cache)))
@@ -417,6 +407,70 @@ Please answer the student's question kindly in Korean, keeping the teacher perso
           (message "[NeuralLingo] 세션 로드 완료!"))
       (message "[NeuralLingo] 저장된 파일이 없습니다."))))
 
+(defun neurallingo-open-reminder ()
+  "저장된 모든 세션을 파일별로 그룹화하여 Org-mode 복습 버퍼를 생성합니다."
+  (interactive)
+  (unless (file-exists-p neurallingo-cache-dir)
+    (make-directory neurallingo-cache-dir t))
+  
+  (let ((files (directory-files neurallingo-cache-dir t "\\.json$"))
+        (buf (get-buffer-create "*NeuralLingo-Reminder*")))
+    (if (null files)
+        (message "[NeuralLingo] 저장된 세션 파일이 없습니다.")
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (org-mode)
+          (insert "#+TITLE: NeuralLingo Vocabulary Reminder\n")
+          (insert "#+STARTUP: content\n")
+          (insert "💡 [Review Guide] 단어를 보고 뜻과 연상법을 떠올려보세요. 'TAB' 키를 눌러 상세 내용을 확인하세요!\n\n")
+
+          (dolist (file files)
+            (let* ((session-name (file-name-base file))
+                   (json-object-type 'alist)
+                   (json-key-type 'string)
+                   (json-array-type 'list)
+                   (data (condition-case nil
+                             (json-read-file file)
+                           (error nil))))
+              (when data
+                (insert (format "* 📁 세션: %s\n" session-name))
+                ;; 세션 헤드라인은 기본적으로 열어둠
+                (insert "  :PROPERTIES:\n  :VISIBILITY: children\n  :END:\n")
+                
+                (dolist (item data)
+                  (let* ((sentence (car item))
+                         (analysis (cdr item))
+                         (vocab-list (or (cdr (assoc "vocabulary" analysis))
+                                         (cdr (assoc 'vocabulary analysis)))))
+                    (when (and vocab-list (not (eq vocab-list 'null)))
+                      (insert (format "** 📖 문장: %s\n" sentence))
+                      ;; 문장 레벨은 기본적으로 자식(단어)을 보여줌
+                      (insert "   :PROPERTIES:\n   :VISIBILITY: children\n   :END:\n")
+                      
+                      (dolist (v vocab-list)
+                        (let ((word (or (cdr (assoc "word" v)) (cdr (assoc 'word v)) "알 수 없음"))
+                              (meaning (or (cdr (assoc "meaning" v)) (cdr (assoc 'meaning v)) "-"))
+                              (pron (or (cdr (assoc "pronunciation" v)) (cdr (assoc 'pronunciation v)) "-"))
+                              (fun (or (cdr (assoc "fun_connection" v)) (cdr (assoc 'fun_connection v)) "-"))
+                              (tip (or (cdr (assoc "pronunciation_tip" v)) (cdr (assoc 'pronunciation_tip v)) "-"))
+                              (examples (or (cdr (assoc "examples" v)) (cdr (assoc 'examples v)))))
+                          (insert (format "*** %s [%s]\n" word pron))
+                          ;; 단어별 상세 내용은 기본적으로 접어둠
+                          (insert "    :PROPERTIES:\n    :VISIBILITY: folded\n    :END:\n")
+                          (insert (format "    - 📖 **뜻:** %s\n" meaning))
+                          (insert (format "    - 🔗 **연상법:** %s\n" fun))
+                          (insert (format "    - 🗣️ **발음 팁:** %s\n" tip))
+                          (when (and examples (listp examples))
+                            (insert "    - 📚 **실생활 예문:**\n")
+                            (dolist (ex examples)
+                              (insert (format "      - %s\n" ex))))
+                          (insert "\n")))))))))
+          (goto-char (point-min))
+          (org-cycle-set-visibility-according-to-property)
+          (pop-to-buffer buf)
+          (message "[NeuralLingo] 리마인더 버퍼 생성 완료!"))))))
+
 ;; 8. 키맵 및 모드 설정
 (defvar neurallingo-mode-map
   (let ((map (make-sparse-keymap)))
@@ -424,6 +478,7 @@ Please answer the student's question kindly in Korean, keeping the teacher perso
     (define-key map (kbd "C-c q") 'neurallingo-ask-question)
     (define-key map (kbd "C-c s") 'neurallingo-save-session)
     (define-key map (kbd "C-c l") 'neurallingo-load-session)
+    (define-key map (kbd "C-c r") 'neurallingo-open-reminder)
     (define-key map (kbd "C-c c") 'neurallingo-clear-all-highlights)
     map))
 

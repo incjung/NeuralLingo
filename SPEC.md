@@ -22,6 +22,16 @@
 - **영구 저장:** 현재 버퍼의 학습 내역(분석 결과, 질문 이력)을 JSON 파일로 로컬 디렉토리에 저장합니다.
 - **복원:** 나중에 해당 문서를 다시 열었을 때 이전에 학습했던 하이라이트와 분석 내용을 그대로 복원합니다.
 
+### 2.4. 단어 리마인더 (C-c r)
+- **세션별 그룹화:** `neurallingo-cache-dir` 내의 모든 JSON 파일을 읽어, 파일 이름(학습 소스)을 최상위 카테고리(`*`)로 분류합니다.
+- **계층적 Org 구조:** 
+    - `* [파일명]` (예: `* README.org`) - 세션 단위 그룹
+    - `** [분석 문장]` (예: `** Learning Emacs is fun.`) - 분석 대상 문장
+    - `*** [단어]` (예: `*** fun`) - 문장에 포함된 개별 학습 단어
+- **인터랙티브 복습:**
+    - **Hide/Show:** `TAB` 키를 사용하여 세션, 문장, 또는 단어별 상세 정보(뜻, 연상법, 예문)를 계층적으로 열람하며 복습합니다.
+    - **자동 렌더링:** `C-c r` 호출 시 실시간으로 저장소의 모든 데이터를 통합하여 전용 버퍼(`*NeuralLingo-Reminder*`)를 생성합니다.
+
 ## 3. 기술 스택 및 요구사항 (Technical Requirements)
 
 ### 3.1. 인프라
@@ -50,6 +60,7 @@
 | `C-c q` | `neurallingo-ask-question` | 분석된 문장에 대해 질문하기 |
 | `C-c s` | `neurallingo-save-session` | 현재 버퍼의 학습 기록 저장 |
 | `C-c l` | `neurallingo-load-session` | 저장된 학습 기록 불러오기 |
+| `C-c r` | `neurallingo-open-reminder` | 저장된 모든 세션을 파일별로 그룹화하여 Org-mode 복습 버퍼 생성 |
 | `C-c c` | `neurallingo-clear-all-highlights` | 모든 하이라이트 및 캐시 초기화 |
 
 ## 6. AI 시스템 프롬프트 (AI System Prompts)
@@ -85,6 +96,7 @@
 - **구현 내용:** AI 응답(JSON)에서 학습 데이터를 추출하여 패널에 렌더링.
 - **핵심 체크리스트:**
   - [x] **Key Type:** `json-key-type`을 `'string`으로 명시하여 `assoc` 검색이 안정적으로 작동하는가?
+  - [x] **Array Type:** `json-array-type`을 `'list`로 명시하여 `vocabulary`, `examples` 등 배열 데이터를 리스트 함수(`dolist`, `mapc`)로 안전하게 처리하는가? (벡터 파싱 오류 방지)
   - [x] **Schema Validation:** `teacher_comment`, `vocabulary` 등 필수 키값이 누락되었을 때의 예외 처리가 되어 있는가?
   - [x] **Trailing Comma:** AI 응답에 trailing comma가 포함되지 않도록 시스템 프롬프트에 명시되어 있는가?
 
@@ -101,3 +113,16 @@
   - [x] **File Encoding:** `coding-system-for-write/read`를 `'utf-8`로 지정하여 저장/로드 시 한글이 보존되는가?
   - [x] **UI Sync:** 세션 로드 시 하이라이트(Overlay)가 본문에 정상적으로 다시 입혀지는가?
   - [x] **Directory Creation:** 캐시 디렉토리가 없을 경우 자동으로 생성하는가?
+
+### Task 5: 세션 그룹화 기반 Org-mode 리마인더 시스템
+- **구현 내용:** 로컬 JSON 저장소의 데이터를 파일명 및 분석 문장 단위로 구조화하여 Org-mode 복습 환경 구축.
+- **핵심 체크리스트:**
+    - [x] **Multi-file Scanning:** `neurallingo-cache-dir` 내의 모든 `.json` 파일을 순회하며 데이터를 수집하는가?
+    - [x] **Hierarchical Grouping:** 
+        - 1단계(`*`): 파일명(세션명)
+        - 2단계(`**`): 분석 대상 원문 문장 (문맥 제공)
+        - 3단계(`***`): 개별 학습 단어
+    - [x] **Visibility Control:** 
+        - 세션 및 문장 레벨은 하위 항목을 보여주도록 설정하는가?
+        - 단어 상세 정보(뜻, 연상법 등)는 복습을 위해 기본적으로 `folded` 상태로 생성하는가?
+    - [x] **Buffer Management:** `*NeuralLingo-Reminder*` 버퍼를 생성하고 `org-mode`를 활성화하여 즉시 학습 가능한 상태로 만드는가?
