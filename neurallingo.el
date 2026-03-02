@@ -183,7 +183,7 @@
                               (append payload-alist '(("generationConfig" . (("responseMimeType" . "application/json")))))
                             payload-alist))
            (url-request-data (encode-coding-string (json-encode payload-alist) 'utf-8))
-           (url (format "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=%s" neurallingo-gemini-api-key)))
+           (url (format "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=%s" neurallingo-gemini-api-key)))
       
       (url-retrieve url
                     (lambda (status cb is-json)
@@ -243,6 +243,7 @@ Rules:
 3. Extract key vocabulary. For each word, provide a 'fun_connection' (etymology, mnemonic using similar-sounding Korean words, or cultural context) to make it unforgettable.
 4. Provide a 'pronunciation_tip' for each word focusing on stress and native-like linking.
 5. Provide exactly TWO practical, real-life examples for each vocabulary word.
+6. Do NOT include trailing commas.
 
 Sentence: \"%s\"
 
