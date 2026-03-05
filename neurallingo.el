@@ -258,29 +258,10 @@ If the token is expired or not available, fetch a new one."
                                                response-str))))))))
                     (kill-buffer (current-buffer))))
                   (list callback parse-json-p))))
-;; 5. 메인 명령어: 문장 분석 (C-c a)
-(defun neurallingo-analyze-current-sentence ()
-  "현재 문장 분석 시작."
-  (interactive)
-  (let* ((bounds (neurallingo--bounds-of-sentence-at-point))
-         (beg (car bounds))
-         (end (cdr bounds))
-         (sentence (buffer-substring-no-properties beg end))
-         (cached-data (gethash sentence neurallingo--analysis-cache)))
-    
-    (neurallingo--highlight-region beg end)
-    
-    (if cached-data
-        (progn
-          (message "[NeuralLingo] ⚡ 캐시된 분석 결과를 불러왔습니다.")
-          (neurallingo--display-result cached-data sentence))
-      (let ((buf (neurallingo--prepare-panel)))
-        (neurallingo--display-result '(("formal_translation" . "선생님이 생각 중...")) sentence)
-        (neurallingo--show-loading buf (format "CONNECTING TO VERTEX AI (%s)..." neurallingo-project-id))
-        (message "[NeuralLingo] 구글 클라우드 크레딧을 사용하여 분석 중입니다...")
-        
-        (let* ((safe-sentence (substring (json-encode sentence) 1 -1))
-               (prompt (format  "You are a highly competent, friendly, and humorous English teacher bridging Korean and English.
+(defun neurallingo--build-analysis-prompt (sentence)
+  "문장 분석용 시스템 프롬프트를 생성합니다."
+  (let ((safe-sentence (substring (json-encode sentence) 1 -1)))
+    (format "You are a highly competent, friendly, and humorous English teacher bridging Korean and English.
 Your goal is to help the user understand English naturally or translate Korean into natural English.
 Use easy-to-understand analogies instead of complex grammar jargon. Maintain an energetic and humorous tone.
 
@@ -310,13 +291,77 @@ Respond ONLY with a valid JSON object matching exactly this schema:
     }
   ]
 }" safe-sentence)))
-          
+
+;; 5. 메인 명령어: 문장 분석 (C-c a)
+(defun neurallingo-analyze-current-sentence ()
+  "현재 문장 분석 시작."
+  (interactive)
+  (let* ((bounds (neurallingo--bounds-of-sentence-at-point))
+         (beg (car bounds))
+         (end (cdr bounds))
+         (sentence (string-trim (buffer-substring-no-properties beg end)))
+         (cached-data (gethash sentence neurallingo--analysis-cache)))
+    
+    (neurallingo--highlight-region beg end)
+    
+    (if cached-data
+        (progn
+          (message "[NeuralLingo] ⚡ 캐시된 분석 결과를 불러왔습니다.")
+          (neurallingo--display-result cached-data sentence))
+      (let ((buf (neurallingo--prepare-panel)))
+        (neurallingo--display-result '(("formal_translation" . "선생님이 생각 중...")) sentence)
+        (neurallingo--show-loading buf (format "CONNECTING TO VERTEX AI (%s)..." neurallingo-project-id))
+        (message "[NeuralLingo] 구글 클라우드 크레딧을 사용하여 분석 중입니다...")
+        
+        (let ((prompt (neurallingo--build-analysis-prompt sentence)))
           (neurallingo--request-gemini-async prompt
            (lambda (parsed-data)
              (puthash sentence parsed-data neurallingo--analysis-cache)
              (neurallingo--display-result parsed-data sentence)
              (message "[NeuralLingo] 분석 완료!"))
            t))))))
+
+;; 5.5. 전체 버퍼 순차 분석 (C-c b)
+(defun neurallingo--analyze-next-sentence (current-point target-buffer)
+  "버퍼의 다음 문장을 찾아 순차적으로 비동기 분석을 수행합니다."
+  (if (not (buffer-live-p target-buffer))
+      (message "[NeuralLingo] 버퍼가 닫혀 분석을 중단합니다.")
+    (with-current-buffer target-buffer
+      (save-excursion
+        (goto-char current-point)
+        (skip-chars-forward " \t\n\r")
+        (if (eobp)
+            (message "[NeuralLingo] 🚀 버퍼 전체 분석이 완료되었습니다!")
+          (let* ((bounds (neurallingo--bounds-of-sentence-at-point))
+                 (beg (car bounds))
+                 (end (cdr bounds))
+                 (sentence (string-trim (buffer-substring-no-properties beg end))))
+            (if (<= end beg)
+                (neurallingo--analyze-next-sentence (min (point-max) (1+ beg)) target-buffer)
+              (if (string-empty-p sentence)
+                  (neurallingo--analyze-next-sentence end target-buffer)
+                (let ((cached-data (gethash sentence neurallingo--analysis-cache)))
+                  (if cached-data
+                      (progn
+                        (neurallingo--highlight-region beg end)
+                        (neurallingo--analyze-next-sentence end target-buffer))
+                    (let ((prompt (neurallingo--build-analysis-prompt sentence)))
+                      (message "[NeuralLingo] 버퍼 순차 분석 중... (%s)" (truncate-string-to-width sentence 30 nil nil "..."))
+                      (neurallingo--request-gemini-async prompt
+                       (lambda (parsed-data)
+                         (when parsed-data
+                           (puthash sentence parsed-data neurallingo--analysis-cache)
+                           (when (buffer-live-p target-buffer)
+                             (with-current-buffer target-buffer
+                               (neurallingo--highlight-region beg end))))
+                         (neurallingo--analyze-next-sentence end target-buffer))
+                       t))))))))))))
+
+(defun neurallingo-analyze-buffer ()
+  "전체 버퍼의 문장들을 백그라운드에서 순차적으로 분석합니다."
+  (interactive)
+  (message "[NeuralLingo] ⏳ 전체 버퍼 순차 분석을 시작합니다...")
+  (neurallingo--analyze-next-sentence (point-min) (current-buffer)))
 
 ;; 6. 메인 명령어: 꼬리 질문 (C-c q)
 (defun neurallingo-ask-question ()
@@ -400,7 +445,7 @@ Please answer the student's question kindly in Korean, keeping the teacher perso
             (goto-char (point-min))
             (while (not (eobp))
               (let* ((bounds (neurallingo--bounds-of-sentence-at-point))
-                     (sentence (buffer-substring-no-properties (car bounds) (cdr bounds))))
+                     (sentence (string-trim (buffer-substring-no-properties (car bounds) (cdr bounds)))))
                 (when (gethash sentence neurallingo--analysis-cache)
                   (neurallingo--highlight-region (car bounds) (cdr bounds))))
               (forward-sentence)))
@@ -475,6 +520,7 @@ Please answer the student's question kindly in Korean, keeping the teacher perso
 (defvar neurallingo-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c a") 'neurallingo-analyze-current-sentence)
+    (define-key map (kbd "C-c b") 'neurallingo-analyze-buffer)
     (define-key map (kbd "C-c q") 'neurallingo-ask-question)
     (define-key map (kbd "C-c s") 'neurallingo-save-session)
     (define-key map (kbd "C-c l") 'neurallingo-load-session)

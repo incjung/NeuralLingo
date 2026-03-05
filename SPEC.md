@@ -32,6 +32,11 @@
     - **Hide/Show:** `TAB` 키를 사용하여 세션, 문장, 또는 단어별 상세 정보(뜻, 연상법, 예문)를 계층적으로 열람하며 복습합니다.
     - **자동 렌더링:** `C-c r` 호출 시 실시간으로 저장소의 모든 데이터를 통합하여 전용 버퍼(`*NeuralLingo-Reminder*`)를 생성합니다.
 
+### 2.5. 전체 버퍼 순차 분석 (C-c b)
+- **순차 분석 (Sequential Async):** 버퍼 내의 모든 문장을 처음부터 끝까지 백그라운드에서 순차적으로 분석합니다.
+- **API 안정성:** 한 문장의 분석 응답을 받은 후 다음 문장을 요청하므로, 과도한 API 호출(Rate Limit)을 방지하고 안정적인 처리를 보장합니다.
+- **무중단 독서 (Non-intrusive UI):** 분석된 문장만 본문에 조용히 하이라이트되며, 사이드 패널이 자동으로 열리지 않아 화면 깜빡임이나 독서 방해가 발생하지 않습니다. 하이라이트된 문장 위에서 `C-c a`를 누르면 즉시 분석 결과를 열람할 수 있습니다.
+
 ## 3. 기술 스택 및 요구사항 (Technical Requirements)
 
 ### 3.1. 인프라
@@ -57,6 +62,7 @@
 | 단축키 | 명령 | 기능 |
 | :--- | :--- | :--- |
 | `C-c a` | `neurallingo-analyze-current-sentence` | 현재 문장 분석 시작 |
+| `C-c b` | `neurallingo-analyze-buffer` | 전체 버퍼 순차 분석 (백그라운드) |
 | `C-c q` | `neurallingo-ask-question` | 분석된 문장에 대해 질문하기 |
 | `C-c s` | `neurallingo-save-session` | 현재 버퍼의 학습 기록 저장 |
 | `C-c l` | `neurallingo-load-session` | 저장된 학습 기록 불러오기 |
@@ -126,3 +132,11 @@
         - 세션 및 문장 레벨은 하위 항목을 보여주도록 설정하는가?
         - 단어 상세 정보(뜻, 연상법 등)는 복습을 위해 기본적으로 `folded` 상태로 생성하는가?
     - [x] **Buffer Management:** `*NeuralLingo-Reminder*` 버퍼를 생성하고 `org-mode`를 활성화하여 즉시 학습 가능한 상태로 만드는가?
+
+### Task 6: 전체 버퍼 순차 분석 (Sequential Buffer Analysis)
+- **구현 내용:** 버퍼 내 모든 문장을 백그라운드에서 순차적으로 API 요청하여 캐싱 및 하이라이트.
+- **핵심 체크리스트:**
+    - [x] **Prompt Refactoring:** 단일 문장 분석과 동일한 프롬프트 구조를 재사용하는가?
+    - [x] **Sequential Async Loop:** 재귀 함수 또는 상태 변수를 이용해 한 API 요청이 끝난 후 다음 요청을 보내는가?
+    - [x] **Non-intrusive UI:** 버퍼 분석 중에는 사이드 패널을 강제로 열지 않는가?
+    - [x] **Cache Bypassing:** 이미 캐시된 문장은 API 요청 없이 즉시 하이라이트하고 다음 문장으로 넘어가는가?
