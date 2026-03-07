@@ -59,7 +59,7 @@ This is a list of (TOKEN . EXPIRATION-TIME).")
 ;; 1. 디자인 및 색상 설정
 (defface neurallingo-highlight-face
   '((((class color) (background dark))
-     (:background "#0f2b3c" :underline (:color "#22d3ee" :style wave)))
+     (:background "#0f2b3c" :underline (:color "#22d3ee")))
     (((class color) (background light))
      (:background "#e0f7fa" :underline (:color "#00acc1" :style wave)))
     (t (:underline t)))
@@ -77,8 +77,8 @@ This is a list of (TOKEN . EXPIRATION-TIME).")
   :group 'neurallingo)
 
 (defface neurallingo-teacher-face
-  '((((class color) (background dark)) (:foreground "#fde047" :slant italic))
-    (((class color) (background light)) (:foreground "#ca8a04" :slant italic))
+  '((((class color) (background dark)) (:foreground "#fde047"))
+    (((class color) (background light)) (:foreground "#ca8a04"))
     (t (:slant italic)))
   "Face for teacher's humorous and energetic comments."
   :group 'neurallingo)
@@ -266,10 +266,10 @@ Your goal is to help the user understand English naturally or translate Korean i
 Use easy-to-understand analogies instead of complex grammar jargon. Maintain an energetic and humorous tone.
 
 Rules:
-1. Provide a welcoming 'teacher_comment' addressing the overall nuance of the sentence and giving native-like pronunciation/intonation feedback.
+1. Provide a welcoming 'teacher_comment' addressing the overall nuance of the sentence and giving native-like pronunciation/intonation feedback in Korean.
 2. Provide both a formal translation and an informal/slang-friendly translation.
 3. Extract key vocabulary. For each word, provide a 'fun_connection' (etymology, mnemonic using similar-sounding Korean words, or cultural context) to make it unforgettable.
-4. Provide a 'pronunciation_tip' for each word focusing on stress and native-like linking.
+4. Provide a 'pronunciation_tip' for each word focusing on stress and native-like linking in Korean.
 5. Provide exactly TWO practical, real-life examples for each vocabulary word.
 6. Do NOT include trailing commas.
 
@@ -286,7 +286,7 @@ Respond ONLY with a valid JSON object matching exactly this schema:
       \"pronunciation\": \"pronunciation symbol & Korean spelling\",
       \"meaning\": \"Korean meaning\",
       \"fun_connection\": \"Fun etymology, mnemonic, or cultural link\",
-      \"pronunciation_tip\": \"Tips on linking, stress, native sounding\",
+      \"pronunciation_tip\": \"Tips on linking, stress, native sounding in Korean as possible\",
       \"examples\": [\"Real-life example 1 with Korean translation\", \"Real-life example 2 with Korean translation\"]
     }
   ]
@@ -395,7 +395,8 @@ The student is studying this sentence: \"%s\"
 [Student's New Question]:
 \"%s\"
 
-Please answer the student's question kindly in Korean, keeping the teacher persona and referencing the analysis if needed." 
+1. Please answer the student's question kindly in Korean, keeping the teacher persona and referencing the analysis if needed.
+2. Please provide the answer in plain text only, without using any Markdown formatting like bolding (double asterisks)" 
                                  sentence analysis-json history-str question)))
             
             (let ((buf (neurallingo--prepare-panel)))
